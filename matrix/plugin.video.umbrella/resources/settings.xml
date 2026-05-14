@@ -1376,6 +1376,11 @@
 					<default>false</default>
 					<control type="toggle"/>
 				</setting>
+				<setting id="tvshows.show.year" type="boolean" label="40679" help="">
+					<level>0</level>
+					<default>false</default>
+					<control type="toggle"/>
+				</setting>
 				<setting id="showunaired" type="boolean" label="32570" help="">
 					<level>0</level>
 					<default>false</default>

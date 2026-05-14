@@ -5841,3 +5841,7 @@ msgstr ""
 msgctxt "#40678"
 msgid "Size, Provider, Quality"
 msgstr ""
+
+msgctxt "#40679"
+msgid "Show Year in TV Show Title"
+msgstr ""
