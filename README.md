@@ -47,7 +47,7 @@ Currently Supported Other Providers:
 **The plugin will not work without at least 1 of these types of accounts**
 
 ## Issues
-Please do not mention any other addons in issues. Any issue opened for Fen Lite will be closed immediately. No work will be done on Fen Lite, it is only being hosted.
+Please do not mention any other addons in issues.
 
 ## Logs
 Enable Logs: Go to Umbrella settings and select Debugging on the left hand side.
