@@ -1,5 +1,5 @@
 <?xml version="1.0" encoding="UTF-8" standalone="yes"?>
-<addon id="repository.umbrella" name="Umbrella Repository" version="2.2.7" provider-name="PeetrP">
+<addon id="repository.umbrella" name="Umbrella Repository" version="2.2.8" provider-name="PeetrP">
     <extension point="xbmc.addon.repository" name="Umbrella Repository (PeetrP)">
         <dir minversion="18.9.701" maxversion="19.5">
             <info compressed="false">https://raw.githubusercontent.com/PeetrP/umbrellaplug.github.io/master/matrix/zips/addons.xml</info>
