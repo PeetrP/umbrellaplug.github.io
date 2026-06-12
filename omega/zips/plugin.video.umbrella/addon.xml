@@ -1,4 +1,4 @@
-<addon id="plugin.video.umbrella" name="Umbrella" provider-name="Umbrella" version="6.7.78">
+<addon id="plugin.video.umbrella" name="Umbrella" provider-name="Umbrella" version="6.7.79">
 	<requires>
 		<import addon="xbmc.python" version="3.0.0" />
 		<import addon="script.module.requests" />
@@ -234,6 +234,11 @@
 			<screenshot>resources/screenshots/screenshot003.jpg</screenshot>
 		</assets>
 		<news>
+[B]Update - v6.7.79 - Jun 12th, 2026 [/B]
+--[Fix] Automatic debrid fallback: retries TorBox (and other enabled debrids) when Real-Debrid blocks or fails a magnet.
+--[Fix] Duplicate torrent hashes now keep the highest-priority debrid account instead of Real-Debrid by default.
+--[Fix] TorBox authorization: manual API token entry, retries on server errors, clearer error messages.
+--[Change] TorBox token field and authorize options in settings.
 [B]Update - v6.7.78 - Jun 12th, 2026 [/B]
 --[Fix] Real-Debrid resolve timeout increased (configurable, default 30s) to prevent skipping uncached sources.
 --[Fix] Largest-file fallback when movie filename matching fails.

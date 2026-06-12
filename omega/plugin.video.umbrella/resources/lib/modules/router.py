@@ -687,6 +687,12 @@ def router(argv2):
 		if action == 'tb_Authorize':
 			from resources.lib.debrid import torbox
 			torbox.TorBox().auth()
+		elif action == 'tb_AuthChoice':
+			from resources.lib.debrid import torbox
+			torbox.TorBox().auth_choice()
+		elif action == 'tb_SetToken':
+			from resources.lib.debrid import torbox
+			torbox.TorBox().set_token_manual()
 		elif action == 'tb_Revoke':
 			from resources.lib.debrid import torbox
 			torbox.TorBox().remove_auth()

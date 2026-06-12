@@ -394,8 +394,14 @@ class Sources:
 				window = SourceResultsXML('source_results.xml', control.addonPath(control.addonId()), results=items, uncached=uncached_items, meta=self.meta)
 			action, chosen_source = window.run()
 			del window
+			if not action or not chosen_source:
+				homeWindow.clearProperty('umbrella.window_keep_alive')
+				try: self.window.close()
+				except: pass
+				control.cancelPlayback()
+				return
 			if action == 'play_Item':
-				return self.playItem(title, items, chosen_source.getProperty('umbrella.source_dict'), self.meta)
+				return self.playItem(title, items, chosen_source.getProperty('umbrella.source_dict'), self.meta, selected_only=True)
 			elif action == 'play_EN_Seekable':
 				from resources.lib.modules import player
 				player.Player().play(chosen_source)
@@ -420,8 +426,9 @@ class Sources:
 			log_utils.error('Error sourceSelect(): ')
 			control.cancelPlayback()
 
-	def playItem(self, title, items, chosen_source, meta):
+	def playItem(self, title, items, chosen_source, meta, selected_only=False):
 		try:
+			self._playback_selected_only = selected_only
 			try: items = jsloads(items)
 			except: pass
 			try: meta = jsloads(meta)
@@ -433,7 +440,7 @@ class Sources:
 				next_end = min(source_len, source_index+41)
 				sources_next = items[source_index+1:next_end]
 				sources_prev = [] if next_end < source_len else items[0:41-(source_len-source_index)]
-				if getSetting('sources.useonlyone')== 'true':
+				if getSetting('sources.useonlyone')== 'true' or selected_only:
 					resolve_items = chosen_source
 				else:
 					resolve_items = [i for i in chosen_source + sources_next + sources_prev]
@@ -1260,7 +1267,7 @@ class Sources:
 		except: log_utils.error()
 
 		self.filter += local # library and video scraper sources
-		self.sources = self.filter
+		self.sources = self._dedupe_debrid_magnets(self.filter)
 
 		if getSetting('realdebrid.filter.filename') == 'true':
 			_rd_block = re.compile(r'(?i)\b(WEB-DL|WEBRip|BDRip|HDRip|DVDRip|HDTV|AMZN|NF|DSNP|CR|YTS|TGX|TorrentGalaxy|FGT|LOL|KILLERS|EPSiLON|Erai-raws)\b|rartv|rarbg|eztv')
@@ -1432,6 +1439,62 @@ class Sources:
 			del progressDialog
 		return url
 
+	def _dedupe_debrid_magnets(self, sources):
+		try:
+			priority = {}
+			for d in self.debrid_resolvers:
+				try: priority[d.name] = int(d.sort_priority)
+				except: priority[d.name] = 10
+			keep_non_magnet, best_by_hash = [], {}
+			for src in sources:
+				if 'magnet:' not in src.get('url', '') or not src.get('hash'):
+					keep_non_magnet.append(src)
+					continue
+				h = src['hash'].lower()
+				pr = priority.get(src.get('debrid', ''), 99)
+				prev = best_by_hash.get(h)
+				if prev is None or pr < prev[0]:
+					best_by_hash[h] = (pr, src)
+			result = keep_non_magnet + [v[1] for v in best_by_hash.values()]
+			if self.debuglog and len(result) < len(sources):
+				log_utils.log('Deduped %s magnet sources by hash (kept highest debrid priority)' % (len(sources) - len(result)), level=log_utils.LOGDEBUG)
+			return result
+		except:
+			log_utils.error()
+			return sources
+
+	def _resolve_magnet_debrid(self, debrid_provider, magnet_url, info_hash, season, episode, title):
+		debrid_map = {
+			'Real-Debrid': ('resources.lib.debrid.realdebrid', 'RealDebrid'),
+			'Premiumize.me': ('resources.lib.debrid.premiumize', 'Premiumize'),
+			'AllDebrid': ('resources.lib.debrid.alldebrid', 'AllDebrid'),
+			'Offcloud': ('resources.lib.debrid.offcloud', 'Offcloud'),
+			'TorBox': ('resources.lib.debrid.torbox', 'TorBox'),
+		}
+		entry = debrid_map.get(debrid_provider)
+		if not entry: return None
+		mod = __import__(entry[0], fromlist=[entry[1]])
+		return getattr(mod, entry[1])().resolve_magnet(magnet_url, info_hash, season, episode, title)
+
+	def _resolve_magnet_with_fallback(self, item, season, episode, title):
+		magnet_url = item['url']
+		info_hash = item['hash']
+		primary = item.get('debrid') or ''
+		order = [primary] if primary else []
+		for resolver in self.debrid_resolvers:
+			if resolver.name not in order:
+				order.append(resolver.name)
+		for debrid_name in order:
+			try:
+				url = self._resolve_magnet_debrid(debrid_name, magnet_url, info_hash, season, episode, title)
+				if url:
+					if debrid_name != primary:
+						log_utils.log('Debrid fallback: %s succeeded after %s failed for %s' % (debrid_name, primary or 'none', item.get('name', '')[:80]), level=log_utils.LOGINFO)
+					return url
+			except:
+				log_utils.error()
+		return None
+
 	def sourcesResolve(self, item):
 		try:
 			url = item['url']
@@ -1449,21 +1512,7 @@ class Sources:
 						season = homeWindow.getProperty(self.seasonProperty)
 						episode = homeWindow.getProperty(self.episodeProperty)
 						title = homeWindow.getProperty(self.titleProperty)
-					if debrid_provider == 'Real-Debrid':
-						from resources.lib.debrid.realdebrid import RealDebrid as debrid_function
-					elif debrid_provider == 'Premiumize.me':
-						from resources.lib.debrid.premiumize import Premiumize as debrid_function
-					elif debrid_provider == 'AllDebrid':
-						from resources.lib.debrid.alldebrid import AllDebrid as debrid_function
-					elif debrid_provider == 'Offcloud':
-						from resources.lib.debrid.offcloud import Offcloud as debrid_function
-					# elif debrid_provider == 'EasyDebrid':  # EasyDebrid disabled
-					# 	from resources.lib.debrid.easydebrid import EasyDebrid as debrid_function
-					elif debrid_provider == 'TorBox':
-						from resources.lib.debrid.torbox import TorBox as debrid_function
-					else: return
-					
-					url = debrid_function().resolve_magnet(url, item['hash'], season, episode, title)
+					url = self._resolve_magnet_with_fallback(item, season, episode, title)
 					self.url = url
 					return url
 				except:
@@ -1612,6 +1661,10 @@ class Sources:
 
 	def _store_playback_fallback(self, resolve_items, current_index, title, items, meta):
 		try:
+			if getattr(self, '_playback_selected_only', False):
+				homeWindow.clearProperty('umbrella.fallback_sources')
+				homeWindow.clearProperty('umbrella.fallback_playinfo')
+				return
 			remaining = resolve_items[current_index + 1:]
 			if not remaining:
 				homeWindow.clearProperty('umbrella.fallback_sources')
@@ -1674,7 +1727,7 @@ class Sources:
 			control.sleep(200)
 			control.hide()
 			if self.url == 'close://': control.notification(message=32400)
-			elif self.retryallsources:
+			elif self.retryallsources and not getattr(self, '_playback_selected_only', False):
 				if self.rescrapeAll == 'true':
 					control.notification(message=32401)
 				else:
@@ -1967,11 +2020,35 @@ class Sources:
 	def rd_cache_chk_list(self, torrent_List, hashList):
 		if len(torrent_List) == 0: return
 		try:
+			from resources.lib.debrid.realdebrid import RealDebrid
+			rd = RealDebrid()
+			if RealDebrid._cache_endpoint_disabled:
+				return torrent_List
+			cached_hashes = set()
+			for chunk_start in range(0, len(hashList), 50):
+				chunk = hashList[chunk_start:chunk_start + 50]
+				try:
+					response = rd.check_cache(chunk)
+					if response:
+						cached_hashes.update(h.lower() for h in response.keys())
+				except:
+					log_utils.error()
+				control.sleep(1100)
+			for i in torrent_List:
+				is_cached = i['hash'].lower() in cached_hashes
+				if is_cached:
+					if 'package' in i: i.update({'source': 'cached (pack) torrent'})
+					else: i.update({'source': 'cached torrent'})
+				else:
+					if 'package' in i: i.update({'source': 'uncached (pack) torrent'})
+					else: i.update({'source': 'uncached torrent'})
+			return torrent_List
+		except:
+			log_utils.error()
 			for i in torrent_List:
 				if 'package' in i: i.update({'source': 'unchecked (pack) torrent'})
 				else: i.update({'source': 'unchecked'})
 			return torrent_List
-		except: log_utils.error()
 
 	def clr_item_providers(self, title, year, imdb, tmdb, tvdb, season, episode, tvshowtitle, premiered):
 		providerscache.remove(self.getSources, title, year, imdb, tmdb, tvdb, season, episode, tvshowtitle, premiered) # function cache removal of selected item ONLY

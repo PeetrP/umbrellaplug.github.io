@@ -3,6 +3,8 @@ from sys import argv, exit as sysexit
 from threading import Thread
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from urllib.parse import urlencode
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
 from resources.lib.modules import control
 from resources.lib.modules import log_utils
 from resources.lib.modules import string_tools
@@ -15,7 +17,9 @@ tb_icon = control.joinPath(control.artPath(), 'torbox.png')
 addonFanart = control.addonFanart()
 
 session = requests.Session()
-session.mount(base_url, requests.adapters.HTTPAdapter(max_retries=1))
+session.headers.update({'User-Agent': 'Mozilla/5.0', 'Accept': 'application/json'})
+retries = Retry(total=3, backoff_factor=1.0, status_forcelist=[500, 502, 503, 504])
+session.mount('https://api.torbox.app', HTTPAdapter(max_retries=retries, pool_maxsize=10))
 
 class TorBox:
 	download = '/torrents/requestdl'
@@ -261,15 +265,47 @@ class TorBox:
 			if item['filename'].endswith('.m2ts'): return True
 		return False
 
+	def _auth_device_start(self, auth_timeout=60, retries=3):
+		last_error = None
+		for attempt in range(retries):
+			try:
+				response = session.get('%s/user/auth/device/start?app=Umbrella' % base_url, timeout=auth_timeout)
+				if response.status_code in (502, 503, 529, 530):
+					last_error = 'TorBox server error (%s)' % response.status_code
+					log_utils.log('TorBox auth start attempt %s: %s' % (attempt + 1, last_error), level=log_utils.LOGWARNING)
+					control.sleep(3000 + (attempt * 2000))
+					continue
+				response.raise_for_status()
+				result = response.json()
+				if result.get('success'):
+					return result
+				last_error = result.get('detail') or result.get('error') or 'Failed to start authorization'
+			except requests.exceptions.HTTPError as e:
+				last_error = str(e)
+				log_utils.log('TorBox auth start attempt %s: %s' % (attempt + 1, last_error), level=log_utils.LOGWARNING)
+				control.sleep(3000 + (attempt * 2000))
+			except (requests.exceptions.Timeout, requests.exceptions.ConnectionError) as e:
+				last_error = str(e)
+				log_utils.log('TorBox auth start attempt %s: %s' % (attempt + 1, last_error), level=log_utils.LOGWARNING)
+				control.sleep(3000 + (attempt * 2000))
+		raise Exception(last_error or 'TorBox authorization unavailable')
+
 	def auth(self):
 		highlight_color = getSetting('highlight.color')
 		line = '%s\n%s\n%s'
+		self.progressDialog = None
 		try:
-			response = requests.get('%s/user/auth/device/start?app=Umbrella' % base_url, timeout=self.timeout)
-			response.raise_for_status()
-			result = response.json()
-			if not result.get('success'):
-				return control.notification(message='TorBox: Failed to start authorization', icon=tb_icon)
+			control.busy()
+			if getSetting('dialogs.useumbrelladialog') == 'true':
+				self.progressDialog = control.getProgressWindow('TorBox', None, 0)
+				self.progressDialog.set_controls()
+				self.progressDialog.update(0, 'Connecting to TorBox...')
+			else:
+				self.progressDialog = control.progressDialog
+				self.progressDialog.create('TorBox', 'Connecting to TorBox...')
+			control.hide()
+			auth_timeout = 60
+			result = self._auth_device_start(auth_timeout=auth_timeout)
 			data = result['data']
 			device_code = data['device_code']
 			user_code = data['code']
@@ -277,6 +313,8 @@ class TorBox:
 			interval = int(data.get('interval', 5))
 			token_ttl = 600
 			expiry = token_ttl
+			try: self.progressDialog.close()
+			except: pass
 			if getSetting('dialogs.useumbrelladialog') == 'true':
 				from resources.lib.modules import tools
 				tb_qr = tools.make_qr(verify_url, 'tb_qr.png')
@@ -287,20 +325,31 @@ class TorBox:
 				self.progressDialog.create('TorBox')
 			self.progressDialog.update(0, line % (getLS(32513) % (highlight_color, verify_url), getLS(32514) % (highlight_color, user_code), getLS(40390)))
 			access_token = None
-			while not access_token and token_ttl > 0 and not self.progressDialog.iscanceled():
+			user_cancelled = False
+			while not access_token and token_ttl > 0:
+				try:
+					if self.progressDialog.iscanceled():
+						user_cancelled = True
+						break
+				except: pass
 				control.sleep(interval * 1000)
 				token_ttl -= interval
 				progress_percent = 100 - int(float(expiry - token_ttl) / expiry * 100)
-				self.progressDialog.update(progress_percent, line % (getLS(32513) % (highlight_color, verify_url), getLS(32514) % (highlight_color, user_code), getLS(40390)))
 				try:
-					poll = requests.post('%s/user/auth/device/token' % base_url, json={'device_code': device_code}, timeout=self.timeout)
+					self.progressDialog.update(progress_percent, line % (getLS(32513) % (highlight_color, verify_url), getLS(32514) % (highlight_color, user_code), getLS(40390)))
+				except: pass
+				try:
+					poll = session.post('%s/user/auth/device/token' % base_url, json={'device_code': device_code}, timeout=auth_timeout)
 					poll_result = poll.json()
 					if poll_result.get('success') and isinstance(poll_result.get('data'), dict):
 						access_token = poll_result['data'].get('access_token')
 				except: pass
-			self.progressDialog.close()
+			try: self.progressDialog.close()
+			except: pass
+			if user_cancelled:
+				return control.okDialog(title='TorBox', message='Authorization cancelled.[CR][CR]Click Authorize again for a new code. Do not close the dialog until TorBox confirms on the website.')
 			if not access_token:
-				return control.notification(message='TorBox: Authorization timed out or cancelled', icon=tb_icon)
+				return control.okDialog(title='TorBox', message='Authorization timed out.[CR][CR]Click Authorize again. You have about 10 minutes to enter the code at torbox.app after the QR appears.')
 			self.api_key = access_token
 			r = self.account_info()
 			customer = r['data']['customer']
@@ -309,11 +358,59 @@ class TorBox:
 			control.notification(message='TorBox successfully authorized', icon=tb_icon)
 			control.openSettings('9.6', 'plugin.video.umbrella')
 			return True
-		except:
-			log_utils.error('TorBox auth: ')
+		except requests.exceptions.Timeout:
+			log_utils.error('TorBox auth: connection timed out')
 			try: self.progressDialog.close()
 			except: pass
-			control.notification(message='Error Authorizing TorBox', icon=tb_icon)
+			control.hide()
+			control.okDialog(title='TorBox', message='Connection to TorBox timed out.[CR][CR]Try again in a minute, or paste your API token manually in the torbox token field (get it from torbox.app → Settings → API).')
+		except requests.exceptions.ConnectionError as e:
+			log_utils.error('TorBox auth: %s' % str(e))
+			try: self.progressDialog.close()
+			except: pass
+			control.hide()
+			control.okDialog(title='TorBox', message='Cannot reach TorBox (api.torbox.app).[CR][CR]Try again later, or paste your API token manually from torbox.app → Settings → API.')
+		except Exception as e:
+			log_utils.error('TorBox auth: %s' % str(e))
+			try: self.progressDialog.close()
+			except: pass
+			control.hide()
+			control.okDialog(title='TorBox', message='TorBox authorization failed.[CR][CR]%s[CR][CR]You can paste your API token manually: torbox.app → log in → Settings → API → copy token → Umbrella → TorBox → torbox token field.' % str(e))
+
+	def auth_choice(self):
+		try:
+			choice = control.selectDialog(['Enter API Token (paste from torbox.app)', 'Authorize with QR code (browser)'], 'TorBox')
+			if choice == 0:
+				return self.set_token_manual()
+			elif choice == 1:
+				return self.auth()
+			return False
+		except:
+			log_utils.error('TorBox auth_choice')
+			return False
+
+	def set_token_manual(self):
+		try:
+			k = control.keyboard('', 'Enter TorBox API token (from torbox.app → Settings → API)')
+			k.doModal()
+			token = k.getText().strip() if k.isConfirmed() else None
+			if not token:
+				return False
+			self.api_key = token
+			r = self.account_info()
+			if not r or not r.get('success') or not r.get('data'):
+				control.okDialog(title='TorBox', message='Invalid API token or TorBox unreachable.[CR][CR]Copy the token from torbox.app → Settings → API and try again.')
+				return False
+			customer = r['data'].get('customer') or r['data'].get('email') or ''
+			control.setSetting('torboxtoken', token)
+			control.setSetting('torbox.username', customer)
+			control.notification(message='TorBox API token saved', icon=tb_icon)
+			control.openSettings('9.6', 'plugin.video.umbrella')
+			return True
+		except:
+			log_utils.error('TorBox set_token_manual')
+			control.okDialog(title='TorBox', message='Failed to save TorBox API token.')
+			return False
 
 	def remove_auth(self):
 		try:

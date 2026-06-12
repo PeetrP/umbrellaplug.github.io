@@ -55,10 +55,13 @@ session.mount('https://api.real-debrid.com', HTTPAdapter(max_retries=retries, po
 class RealDebrid:
 	name = "Real-Debrid"
 	sort_priority = getSetting('realdebrid.priority')
+	_cache_endpoint_disabled = False
+	_last_notify_error = None
 	def __init__(self):
 		self.hosters = None
 		self.hosts = None
 		self.cache_check_results = {}
+		self.last_error = None
 		self.token = getSetting('realdebridtoken')
 		self.client_ID = getSetting('realdebrid.clientid')
 		if self.client_ID == '': self.client_ID = 'X245A4XAIBGVM'
@@ -69,6 +72,36 @@ class RealDebrid:
 		self.server_notifications = getSetting('realdebrid.server.notifications') == 'true'
 		self.store_to_cloud = getSetting('realdebrid.saveToCloud') == 'true'
 		self.highlightColor = control.setting('highlight.color')
+
+	def _parse_api_error(self, response):
+		if not isinstance(response, dict):
+			return response
+		message = response.get('error')
+		if not message:
+			return response
+		self.last_error = message
+		if message == 'disabled_endpoint':
+			RealDebrid._cache_endpoint_disabled = True
+			log_utils.log('Real-Debrid: API endpoint disabled (%s)' % message, __name__, log_utils.LOGWARNING)
+			return None
+		if message == 'infringing_file':
+			log_utils.log('Real-Debrid: torrent blocked (infringing_file). If all torrents fail, check your RD account at real-debrid.com', __name__, log_utils.LOGWARNING)
+			if self.server_notifications and RealDebrid._last_notify_error != message and not control.homeWindow.getProperty('umbrella.preResolving'):
+				RealDebrid._last_notify_error = message
+				control.notification(message='Real-Debrid blocked this torrent (copyright). Check your RD account if all fail.', icon=rd_icon)
+			return None
+		if message == 'too_many_requests':
+			log_utils.log('Real-Debrid: rate limited (too_many_requests) - wait and retry', __name__, log_utils.LOGWARNING)
+			if self.server_notifications and RealDebrid._last_notify_error != message and not control.homeWindow.getProperty('umbrella.preResolving'):
+				RealDebrid._last_notify_error = message
+				control.notification(message='Real-Debrid rate limit - wait a minute and try again', icon=rd_icon)
+			return None
+		if message in ('action_already_done', 'parameter_missing'):
+			return None
+		if self.server_notifications and not control.homeWindow.getProperty('umbrella.preResolving'):
+			control.notification(message=message, icon=rd_icon)
+		log_utils.log('Real-Debrid Error: %s' % message, __name__, log_utils.LOGWARNING)
+		return None
 
 	def _get(self, url, fail_check=False, token_ck=False):
 		response = None
@@ -90,6 +123,8 @@ class RealDebrid:
 				log_utils.log('Real-Debrid Temporarily Down For Maintenance', level=log_utils.LOGWARNING)
 				return None
 			else: response = response.json()
+			if isinstance(response, dict) and response.get('error'):
+				return self._parse_api_error(response)
 			if any(value in str(response) for value in ('bad_token', 'Bad Request')):
 				if not fail_check:
 					if self.refresh_token() and token_ck: return
@@ -103,8 +138,8 @@ class RealDebrid:
 		return response
 
 	def _post(self, url, data):
-		#pause for real debrid api restriction of 1 request per second
-		#control.sleep(1000)
+		# Real-Debrid allows ~1 request per second
+		control.sleep(1100)
 		try:
 			original_url = url
 			url = rest_base_url + url
@@ -122,15 +157,11 @@ class RealDebrid:
 				log_utils.log('Real-Debrid Temporarily Down For Maintenance', level=log_utils.LOGWARNING)
 				return None
 			else: response = response.json()
+			if isinstance(response, dict) and response.get('error'):
+				return self._parse_api_error(response)
 			if any(value in str(response) for value in ('bad_token', 'Bad Request')):
 				self.refresh_token()
 				response = self._post(original_url, data)
-			elif 'error' in response:
-				message = response.get('error')
-				if message in ('action_already_done', 'infringing_file', 'parameter_missing', 'too_many_requests'): return None
-				if self.server_notifications and not control.homeWindow.getProperty('umbrella.preResolving'): control.notification(message=message, icon=rd_icon)
-				log_utils.log('Real-Debrid Error:  %s' % message, log_utils.LOGWARNING)
-				return None
 			return response
 		except: log_utils.error()
 
@@ -389,9 +420,13 @@ class RealDebrid:
 		except: log_utils.error('Real-Debrid Error: DELETE DOWNLOAD %s : ' % name)
 
 	def check_cache(self, hashList):
+		if RealDebrid._cache_endpoint_disabled:
+			return None
 		if isinstance(hashList, list): hashString = '/' + '/'.join(hashList)
 		else: hashString = "/" + hashList
 		response = self._get("torrents/instantAvailability" + hashString)
+		if isinstance(response, dict) and response.get('error') == 'disabled_endpoint':
+			return None
 		return response
 
 	def _resolve_timeout(self):
@@ -399,6 +434,18 @@ class RealDebrid:
 			return max(4, int(getSetting('realdebrid.resolve.timeout') or 30))
 		except:
 			return 30
+
+	def _selected_video_files(self, torrent_info, extensions):
+		links = torrent_info.get('links') or []
+		selected_files = []
+		link_idx = 0
+		for f in torrent_info.get('files') or []:
+			if f.get('selected') != 1:
+				continue
+			if link_idx < len(links) and f['path'].lower().endswith(tuple(extensions)):
+				selected_files.append((link_idx, f))
+			link_idx += 1
+		return selected_files
 
 	def resolve_magnet(self, magnet_url, info_hash, season, episode, title):
 		from resources.lib.modules.source_utils import seas_ep_filter, extras_filter
@@ -410,66 +457,94 @@ class RealDebrid:
 				extras_filtering_list = extras_filter()
 				info_hash = info_hash.lower()
 				compare_title = re.sub(r'[^A-Za-z0-9-]+', '.', title.replace('\'', '').replace('&', 'and').replace('%', '.percent')).lower()
-				elapsed_time, transfer_finished = 0, False
+				elapsed_time, transfer_finished, torrent_info = 0, False, None
 				self.rd_check_max()
 				torrent_id = self.add_magnet(magnet_url)
 				if not torrent_id:
 					return None
-				self.add_torrent_select(torrent_id,'all')
-				torrent_info = self.user_cloud_info_check(torrent_id)
-				if not torrent_info or not torrent_info.get('links') or 'error' in torrent_info:
-					self.delete_torrent(torrent_id)
-					return None
-				control.sleep(1000)
+				pending_info = None
+				for _ in range(5):
+					pending_info = self.torrent_info(torrent_id) or self.user_cloud_info_check(torrent_id)
+					if pending_info and pending_info.get('files'):
+						break
+					control.sleep(1000)
+				if pending_info and pending_info.get('files'):
+					video_ids = [str(item['id']) for item in pending_info['files'] if item['path'].lower().endswith(tuple(extensions))]
+					if video_ids:
+						self.add_torrent_select(torrent_id, ','.join(video_ids))
+					else:
+						self.add_torrent_select(torrent_id, 'all')
+				else:
+					self.add_torrent_select(torrent_id, 'all')
 				resolve_timeout = self._resolve_timeout()
 				while elapsed_time <= resolve_timeout and not transfer_finished:
-					active_count = self.torrents_activeCount()
-					active_list = active_count['list']
+					torrent_info = self.user_cloud_info_check(torrent_id)
+					if not torrent_info or 'error' in torrent_info:
+						control.sleep(1000)
+						elapsed_time += 1
+						continue
+					if torrent_info.get('links'):
+						try:
+							active_count = self.torrents_activeCount()
+							active_list = active_count.get('list', []) if active_count else []
+						except:
+							active_list = []
+						if info_hash not in active_list or torrent_info.get('status') == 'downloaded':
+							transfer_finished = True
+							break
+					control.sleep(1000)
 					elapsed_time += 1
-					if info_hash in active_list: control.sleep(1000)
-					else: transfer_finished = True
+				torrent_info = self.user_cloud_info_check(torrent_id) or torrent_info
+				if not torrent_info or not torrent_info.get('links'):
+					log_utils.log('Real-Debrid: no links for magnet "%s" after %ss' % (magnet_url, elapsed_time), __name__, log_utils.LOGWARNING)
+					self.delete_torrent(torrent_id)
+					return None
 				if not transfer_finished:
 					log_utils.log('Real-Debrid: resolve timeout (%ss) for magnet "%s"' % (resolve_timeout, magnet_url), __name__, log_utils.LOGWARNING)
 					self.delete_torrent(torrent_id)
 					return None
-				selected_files = [(idx, i) for idx, i in enumerate([i for i in torrent_info['files'] if i['selected'] == 1]) if i['path'].lower().endswith(tuple(extensions))]
+				selected_files = self._selected_video_files(torrent_info, extensions)
 				selected_files = sorted(selected_files, key=lambda x: x[1]['bytes'], reverse=True)
 				match = False
+				index = None
 				if season:
 					correct_files = []
 					correct_file_check = False
-					for value in selected_files:
-						correct_file_check = seas_ep_filter(season, episode, value[1]['path'])
-						if correct_file_check: correct_files.append(value[1]); break
+					for link_idx, f in selected_files:
+						correct_file_check = seas_ep_filter(season, episode, f['path'])
+						if correct_file_check: correct_files.append((link_idx, f)); break
 					if len(correct_files) == 0: match = False
 					else:
-						for i in correct_files:
+						for link_idx, i in correct_files:
 							compare_link = seas_ep_filter(season, episode, i['path'], split=True)
 							compare_link = re.sub(compare_title, '', compare_link)
 							if any(x in compare_link for x in extras_filtering_list): continue
-							else: match = True; break
-					if match: index = [i[0] for i in selected_files if i[1]['path'] == correct_files[0]['path']][0]
+							else: match, index = True, link_idx; break
 				else:
-					for value in selected_files:
-						filename = re.sub(r'[^A-Za-z0-9-]+', '.', value[1]['path'].rsplit('/', 1)[1].replace('\'', '').replace('&', 'and').replace('%', '.percent')).lower()
+					for link_idx, f in selected_files:
+						filename = re.sub(r'[^A-Za-z0-9-]+', '.', f['path'].rsplit('/', 1)[1].replace('\'', '').replace('&', 'and').replace('%', '.percent')).lower()
 						filename_info = filename.replace(compare_title, '')
 						if any(x in filename_info for x in extras_filtering_list): continue
-						match, index = True, value[0]; break
+						match, index = True, link_idx; break
 					if not match and selected_files:
 						match, index = True, selected_files[0][0]
 						failed_reason = 'Used largest-file fallback'
-				if match:
+				if match and index is not None and index < len(torrent_info['links']):
 					rd_link = torrent_info['links'][index]
 					file_url = self.unrestrict_link(rd_link)
-					if file_url.endswith('rar'):
+					if not file_url:
+						file_url, failed_reason = None, 'RD unrestrict_link returned None (link index %s)' % index
+					elif file_url.endswith('rar'):
 						file_url, failed_reason = None, 'RD returned unsupported .rar file --> %s' % file_url
-					try:
-						if not any(file_url.lower().endswith(x) for x in extensions):
-							file_url, failed_reason = None, 'RD returned unsupported file extension --> %s' % file_url
-					except:
+					else:
+						try:
+							if not any(file_url.lower().endswith(x) for x in extensions):
+								file_url, failed_reason = None, 'RD returned unsupported file extension --> %s' % file_url
+						except:
 							file_url, failed_reason = None, 'RD returned unsupported file extension or error getting file extension.'
 					if not self.store_to_cloud: self.delete_torrent(torrent_id)
 				else:
+					failed_reason = 'No matching video file in torrent'
 					self.delete_torrent(torrent_id)
 				if not file_url:
 					log_utils.log('Real-Debrid: FAILED TO RESOLVE MAGNET "%s" : (%s)' % (magnet_url, failed_reason), __name__, log_utils.LOGWARNING)
@@ -668,11 +743,15 @@ class RealDebrid:
 	def add_magnet(self, magnet):
 		try:
 			data = {'magnet': magnet}
-
 			response = self._post(add_magnet_url, data)
-			log_utils.log('Real-Debrid: Sending MAGNET to cloud: %s' % magnet, __name__, log_utils.LOGDEBUG)
-			return response.get('id', "") if response else ""
+			torrent_id = response.get('id', '') if response else ''
+			if torrent_id:
+				log_utils.log('Real-Debrid: Sending MAGNET to cloud: %s' % magnet, __name__, log_utils.LOGDEBUG)
+			else:
+				log_utils.log('Real-Debrid: add_magnet failed (%s) for: %s' % (self.last_error or 'no torrent id', magnet), __name__, log_utils.LOGWARNING)
+			return torrent_id
 		except: log_utils.error('Real-Debrid Error: ADD MAGNET to cloud%s : ' % magnet)
+		return ''
 
 	def add_torrent_select(self, torrent_id, file_ids):
 		try:

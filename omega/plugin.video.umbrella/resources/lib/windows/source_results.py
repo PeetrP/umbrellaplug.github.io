@@ -36,6 +36,7 @@ class SourceResultsXML(BaseDialog):
 		self.filePursuitHighlightColor = self.colors['filepursuit']
 		self.dialogColor = getSetting('scraper.dialog.color')
 		self.highlight_color = getSetting('highlight.color')
+		self.selected = (None, '')
 		self.make_items()
 		self.set_properties()
 
