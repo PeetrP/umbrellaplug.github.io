@@ -4433,6 +4433,26 @@
 					</dependencies>
 					<control type="toggle"/>
 				</setting>
+				<setting id="realdebrid.resolve.timeout" type="number" label="Real-Debrid resolve timeout (seconds)" help="">
+					<level>0</level>
+					<default>30</default>
+					<constraints>
+						<minimum>4</minimum>
+						<step>1</step>
+						<maximum>120</maximum>
+					</constraints>
+					<dependencies>
+						<dependency type="visible">
+							<and>
+								<condition operator="!is" setting="realdebridtoken"/>
+								<condition operator="is" setting="realdebrid.enable">true</condition>
+							</and>
+						</dependency>
+					</dependencies>
+					<control type="slider" format="integer">
+						<popup>false</popup>
+					</control>
+				</setting>
 				<setting id="rd_cloud.enabled" type="boolean" label="32050" help="">
 					<level>0</level>
 					<default>false</default>

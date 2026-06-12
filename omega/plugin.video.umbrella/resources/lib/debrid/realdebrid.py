@@ -394,6 +394,12 @@ class RealDebrid:
 		response = self._get("torrents/instantAvailability" + hashString)
 		return response
 
+	def _resolve_timeout(self):
+		try:
+			return max(4, int(getSetting('realdebrid.resolve.timeout') or 30))
+		except:
+			return 30
+
 	def resolve_magnet(self, magnet_url, info_hash, season, episode, title):
 		from resources.lib.modules.source_utils import seas_ep_filter, extras_filter
 		# from resources.lib.cloud_scrapers.cloud_utils import cloud_check_title # alias and title checking no longer used
@@ -415,13 +421,15 @@ class RealDebrid:
 					self.delete_torrent(torrent_id)
 					return None
 				control.sleep(1000)
-				while elapsed_time <= 4 and not transfer_finished:
+				resolve_timeout = self._resolve_timeout()
+				while elapsed_time <= resolve_timeout and not transfer_finished:
 					active_count = self.torrents_activeCount()
 					active_list = active_count['list']
 					elapsed_time += 1
 					if info_hash in active_list: control.sleep(1000)
 					else: transfer_finished = True
 				if not transfer_finished:
+					log_utils.log('Real-Debrid: resolve timeout (%ss) for magnet "%s"' % (resolve_timeout, magnet_url), __name__, log_utils.LOGWARNING)
 					self.delete_torrent(torrent_id)
 					return None
 				selected_files = [(idx, i) for idx, i in enumerate([i for i in torrent_info['files'] if i['selected'] == 1]) if i['path'].lower().endswith(tuple(extensions))]
@@ -447,6 +455,9 @@ class RealDebrid:
 						filename_info = filename.replace(compare_title, '')
 						if any(x in filename_info for x in extras_filtering_list): continue
 						match, index = True, value[0]; break
+					if not match and selected_files:
+						match, index = True, selected_files[0][0]
+						failed_reason = 'Used largest-file fallback'
 				if match:
 					rd_link = torrent_info['links'][index]
 					file_url = self.unrestrict_link(rd_link)

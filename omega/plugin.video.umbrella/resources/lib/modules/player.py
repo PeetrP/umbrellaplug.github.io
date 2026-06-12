@@ -764,6 +764,11 @@ class Player(xbmc.Player):
 		Bookmarks().reset(self.current_time, self.media_length, self.name, self.year)
 		log_utils.error()
 		log_utils.log('onPlayBackError callback', level=log_utils.LOGDEBUG)
+		try:
+			from resources.lib.modules.sources import Sources
+			if Sources().playFallbackSources():
+				return
+		except: log_utils.error()
 		#control.checkforSkin(action='off')
 		sysexit(1)
 

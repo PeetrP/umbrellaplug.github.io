@@ -438,6 +438,7 @@ class Sources:
 				else:
 					resolve_items = [i for i in chosen_source + sources_next + sources_prev]
 			except: log_utils.error()
+			control.playlist.clear()
 			try:
 				poster = meta.get('poster')
 			except:
@@ -484,9 +485,14 @@ class Sources:
 						progressDialog.update(int((100 / float(len(resolve_items))) * i), label)
 					except: 
 						progressDialog.update(int((100 / float(len(resolve_items))) * i), '[COLOR %s]Resolving...[/COLOR]%s' % (self.highlight_color, resolve_items[i]['name']))
+					self.url = None
 					w = Thread(target=self.sourcesResolve, args=(resolve_items[i],))
 					w.start()
-					for x in range(40):
+					try:
+						resolve_wait_iters = (max(4, int(getSetting('realdebrid.resolve.timeout') or 30)) + 10) * 5
+					except:
+						resolve_wait_iters = 200
+					for x in range(resolve_wait_iters):
 						try:
 							if control.monitor.abortRequested(): return sysexit()
 							if progressDialog.iscanceled():
@@ -498,8 +504,9 @@ class Sources:
 						except: pass
 						if not w.is_alive(): break
 						control.sleep(200)
-					if not self.url: continue
-					# if not any(x in self.url.lower() for x in video_extensions):
+					if not self.url:
+						log_utils.log('Resolve failed for (playItem()): %s / %s' % (resolve_items[i].get('provider', ''), resolve_items[i].get('name', '')), level=log_utils.LOGWARNING)
+						continue
 					if not any(x in self.url.lower() for x in video_extensions) and 'plex.direct:' not in self.url and 'torbox' not in self.url and 'tb-cdn' not in self.url and 'plugin://plugin.video.composite_for_plex' not in self.url:
 						log_utils.log('Playback not supported for (playItem()): %s' % self.url, level=log_utils.LOGWARNING)
 						continue
@@ -507,6 +514,7 @@ class Sources:
 						try: progressDialog.close()
 						except: pass
 						del progressDialog
+					self._store_playback_fallback(resolve_items, i, title, items, meta)
 					from resources.lib.modules import player
 					player.Player().play_source(
 						title,
@@ -523,7 +531,17 @@ class Sources:
 			try: progressDialog.close()
 			except: pass
 			del progressDialog
-			self.errorForSources()
+			homeWindow.clearProperty('umbrella.fallback_sources')
+			homeWindow.clearProperty('umbrella.fallback_playinfo')
+			self.errorForSources(
+				title=title,
+				year=getattr(self, 'year', meta.get('year') if isinstance(meta, dict) else None),
+				imdb=getattr(self, 'imdb', meta.get('imdb', '') if isinstance(meta, dict) else ''),
+				tmdb=getattr(self, 'tmdb', meta.get('tmdb', '') if isinstance(meta, dict) else ''),
+				tvdb=getattr(self, 'tvdb', meta.get('tvdb', '') if isinstance(meta, dict) else ''),
+				season=getattr(self, 'season', meta.get('season') if isinstance(meta, dict) else None),
+				episode=getattr(self, 'episode', meta.get('episode') if isinstance(meta, dict) else None)
+			)
 		except: log_utils.error('Error playItem: ')
 
 	def getSources(self, title, year, imdb, tmdb, tvdb, season, episode, tvshowtitle, premiered, meta=None, preScrape=False):
@@ -1353,6 +1371,7 @@ class Sources:
 		#control.hide()
 		#control.sleep(200)
 		if getSetting('autoplay.sd') == 'true': items = [i for i in items if not i['quality'] in ('4K', '1080p', '720p')]
+		control.playlist.clear()
 		header = homeWindow.getProperty(self.labelProperty) + ': Resolving...'
 		try:
 			poster = self.meta.get('poster')
@@ -1394,14 +1413,18 @@ class Sources:
 				except: progressDialog.update(int((100 / float(len(items))) * i), '[COLOR %s]Resolving...[/COLOR]%s' % (self.highlight_color, items[i]['name']))
 				try:
 					if control.monitor.abortRequested(): return sysexit()
+					self.url = None
 					url = self.sourcesResolve(items[i])
-					# if not any(x in url.lower() for x in video_extensions):
-					if not any(x in self.url.lower() for x in video_extensions) and 'plex.direct:' not in self.url and 'torbox' not in self.url and 'tb-cdn' not in self.url and 'plugin://plugin.video.composite_for_plex' not in self.url:
-						log_utils.log('Playback not supported for (sourcesAutoPlay()): %s' % url, level=log_utils.LOGWARNING)
+					if not self.url:
+						log_utils.log('Resolve failed for (sourcesAutoPlay()): %s / %s' % (items[i].get('provider', ''), items[i].get('name', '')), level=log_utils.LOGWARNING)
 						continue
-					if url:
-						break
-				except: pass
+					if not any(x in self.url.lower() for x in video_extensions) and 'plex.direct:' not in self.url and 'torbox' not in self.url and 'tb-cdn' not in self.url and 'plugin://plugin.video.composite_for_plex' not in self.url:
+						log_utils.log('Playback not supported for (sourcesAutoPlay()): %s' % self.url, level=log_utils.LOGWARNING)
+						continue
+					url = self.url
+					break
+				except:
+					log_utils.error()
 			except: log_utils.error()
 		if homeWindow.getProperty('umbrella.window_keep_alive') != 'true':
 			try: progressDialog.close()
@@ -1587,9 +1610,66 @@ class Sources:
 			control.execute('PlayMedia(%s)' % url)
 		except: log_utils.error()
 
+	def _store_playback_fallback(self, resolve_items, current_index, title, items, meta):
+		try:
+			remaining = resolve_items[current_index + 1:]
+			if not remaining:
+				homeWindow.clearProperty('umbrella.fallback_sources')
+				homeWindow.clearProperty('umbrella.fallback_playinfo')
+				return
+			homeWindow.setProperty('umbrella.fallback_sources', quote_plus(jsdumps(remaining)))
+			playinfo = {
+				'title': title,
+				'year': getattr(self, 'year', meta.get('year') if isinstance(meta, dict) else None),
+				'season': getattr(self, 'season', meta.get('season') if isinstance(meta, dict) else None),
+				'episode': getattr(self, 'episode', meta.get('episode') if isinstance(meta, dict) else None),
+				'imdb': getattr(self, 'imdb', meta.get('imdb', '') if isinstance(meta, dict) else ''),
+				'tmdb': getattr(self, 'tmdb', meta.get('tmdb', '') if isinstance(meta, dict) else ''),
+				'tvdb': getattr(self, 'tvdb', meta.get('tvdb', '') if isinstance(meta, dict) else ''),
+				'meta': meta,
+				'items': items
+			}
+			homeWindow.setProperty('umbrella.fallback_playinfo', quote_plus(jsdumps(playinfo)))
+		except: log_utils.error()
+
+	def playFallbackSources(self):
+		try:
+			fallback = homeWindow.getProperty('umbrella.fallback_sources')
+			if not fallback: return False
+			playinfo_raw = homeWindow.getProperty('umbrella.fallback_playinfo')
+			homeWindow.clearProperty('umbrella.fallback_sources')
+			homeWindow.clearProperty('umbrella.fallback_playinfo')
+			if not playinfo_raw: return False
+			remaining = jsloads(unquote(fallback.replace('%22', '\\"')))
+			playinfo = jsloads(unquote(playinfo_raw.replace('%22', '\\"')))
+			if not remaining: return False
+			self.title = playinfo.get('title')
+			self.year = playinfo.get('year')
+			self.season = playinfo.get('season')
+			self.episode = playinfo.get('episode')
+			self.imdb = playinfo.get('imdb')
+			self.tmdb = playinfo.get('tmdb')
+			self.tvdb = playinfo.get('tvdb')
+			self.meta = playinfo.get('meta')
+			log_utils.log('Playback fallback: trying %s remaining source(s)' % len(remaining), level=log_utils.LOGDEBUG)
+			control.playlist.clear()
+			return self.playItem(playinfo.get('title'), playinfo.get('items', remaining), jsdumps([remaining[0]]), playinfo.get('meta', {})) is not None
+		except:
+			log_utils.error()
+			return False
+
 	def errorForSources(self,title=None, year=None, imdb=None, tmdb=None, tvdb=None, season=None, episode=None, tvshowtitle=None, premiered=None):
 		try:
-			
+			title = title or getattr(self, 'title', None) or (self.meta.get('title') if self.meta else None)
+			year = year or getattr(self, 'year', None) or (self.meta.get('year') if self.meta else None)
+			imdb = imdb or getattr(self, 'imdb', None) or (self.meta.get('imdb') if self.meta else None)
+			tmdb = tmdb or getattr(self, 'tmdb', None) or (self.meta.get('tmdb') if self.meta else None)
+			tvdb = tvdb or getattr(self, 'tvdb', None) or (self.meta.get('tvdb') if self.meta else None)
+			season = season or getattr(self, 'season', None) or (self.meta.get('season') if self.meta else None)
+			episode = episode or getattr(self, 'episode', None) or (self.meta.get('episode') if self.meta else None)
+			tvshowtitle = tvshowtitle or getattr(self, 'tvshowtitle', None) or (self.meta.get('tvshowtitle') if self.meta else None)
+			premiered = premiered or getattr(self, 'premiered', None) or (self.meta.get('premiered') if self.meta else None)
+			if not title: raise Exception('missing title for errorForSources')
 			homeWindow.clearProperty('umbrella.window_keep_alive')
 			control.sleep(200)
 			control.hide()
